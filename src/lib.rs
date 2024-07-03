@@ -1,6 +1,6 @@
 #![no_std]
 
-use core::{panic::PanicInfo, slice};
+use core::{ panic::PanicInfo, ptr::{ addr_of, addr_of_mut }, slice };
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
@@ -9,20 +9,20 @@ fn panic(_info: &PanicInfo) -> ! {
 }
 
 #[derive(Clone, Copy)]
-pub union Vector {
+pub union Handler {
     handler: unsafe extern "C" fn(),
     reserved: usize,
 }
 
-impl Vector {
+impl Handler {
     #[inline]
     const fn reserved() -> Self {
-        Vector { reserved: 0 }
+        Handler { reserved: 0 }
     }
 
     #[inline]
-    const fn handler(func: unsafe extern "C" fn()) -> Self {
-        Vector { handler: func }
+    const fn new(func: unsafe extern "C" fn()) -> Self {
+        Handler { handler: func }
     }
 }
 
@@ -33,48 +33,53 @@ extern "C" fn __default_handler() {
 }
 
 #[no_mangle]
-extern "C" fn __reset_handler() -> ! {
-    init_bss_memory();
+unsafe extern "C" fn __reset_handler() -> ! {
+    init_bss();
+    init_data();
 
     extern "C" {
         fn __main() -> !;
     }
 
-    unsafe { __main() }
+    __main()
 }
 
 #[inline]
-pub fn heap_start() -> *mut u32 {
-    unsafe { &mut __heep_start }
+pub unsafe fn heap_start() -> *mut u32 {
+    extern "C" {
+        static mut __heep_start: u32;
+    }
+
+    addr_of_mut!(__heep_start)
 }
 
-fn init_bss_memory() {
+#[inline(always)]
+unsafe fn init_bss() {
     extern "C" {
-        static mut __start_bss: u32;
-        static mut __end_bss: u32;
+        static mut __sbss: u32;
+        static __ebss: u32;
+    }
 
-        static mut __start_data: u32;
-        static mut __end_data: u32;
+    let bss_size = addr_of!(__ebss).offset_from(addr_of!(__sbss)) as usize;
+    if bss_size > 0 {
+        slice::from_raw_parts_mut(addr_of_mut!(__sbss), bss_size).fill(0);
+    }
+}
 
+#[inline(always)]
+unsafe fn init_data() {
+    extern "C" {
+        static mut __sdata: u32;
+        static __edata: u32;
         static __sidata: u32;
     }
 
-    /* Init .bss memory */
-    unsafe {
-        let start_bss = &mut __start_bss as *mut u32;
-        let end_bss = &__end_bss as *const u32;
-        let count = end_bss.offset_from(start_bss) as usize;
-        slice::from_raw_parts_mut(start_bss, count).fill(0);
+    let data_size = addr_of!(__edata).offset_from(addr_of!(__sdata)) as usize;
+    if data_size > 0 {
+        let data = slice::from_raw_parts_mut(addr_of_mut!(__sdata), data_size);
+        let idata = slice::from_raw_parts(&__sidata as *const u32, data_size);
 
-        let start_data = &mut __start_data as *mut u32;
-        let end_data = &__end_data as *const u32;
-        let count = end_data.offset_from(start_data) as usize;
-
-        let start_idata = &__sidata as *const u32;
-
-        slice
-            ::from_raw_parts_mut(start_data, count)
-            .copy_from_slice(slice::from_raw_parts(start_idata, count));
+        data.copy_from_slice(idata);
     }
 }
 
@@ -84,288 +89,286 @@ pub static __RESET_VECTOR: unsafe extern "C" fn() -> ! = __reset_handler;
 
 #[no_mangle]
 #[link_section = ".vector_table.exceptions"]
-pub static __EXCEPTIONS: [Vector; 14] = [
+pub static __EXCEPTIONS: [Handler; 14] = [
     // Exception 2: Non Maskable Interrupt.
-    Vector::handler(__non_maskable_interrupt),
+    Handler::new(__non_maskable_interrupt),
     // Exception 3: Hard Fault Interrupt.
-    Vector::handler(__hard_fault),
+    Handler::new(__hard_fault),
     // Exception 4: Memory Management Interrupt [not on Cortex-M0 variants].
-    #[cfg(not(armv6m))] Vector::handler(__memory_management_fault),
-    #[cfg(armv6m)] Vector::reserved(),
+    #[cfg(not(armv6m))] Handler::new(__memory_management_fault),
+    #[cfg(armv6m)] Handler::reserved(),
     // Exception 5: Bus Fault Interrupt [not on Cortex-M0 variants].
-    #[cfg(not(armv6m))] Vector::handler(__bus_fault),
-    #[cfg(armv6m)] Vector::reserved(),
+    #[cfg(not(armv6m))] Handler::new(__bus_fault),
+    #[cfg(armv6m)] Handler::reserved(),
     // Exception 6: Usage Fault Interrupt [not on Cortex-M0 variants].
-    #[cfg(not(armv6m))] Vector::handler(__usage_fault),
-    #[cfg(armv6m)] Vector::reserved(),
+    #[cfg(not(armv6m))] Handler::new(__usage_fault),
+    #[cfg(armv6m)] Handler::reserved(),
     // Exception 7: Secure Fault Interrupt [only on Armv8-M].
-    #[cfg(armv8m)] Vector::handler(__secure_fault),
-    #[cfg(not(armv8m))] Vector::reserved(),
+    #[cfg(armv8m)] Handler::new(__secure_fault),
+    #[cfg(not(armv8m))] Handler::reserved(),
     // 8-10: Reserved
-    Vector::reserved(),
-    Vector::reserved(),
-    Vector::reserved(),
+    Handler::reserved(),
+    Handler::reserved(),
+    Handler::reserved(),
     // Exception 11: SV Call Interrupt.
-    Vector::handler(__sv_call),
+    Handler::new(__sv_call),
     // Exception 12: Debug Monitor Interrupt [not on Cortex-M0 variants].
-    #[cfg(not(armv6m))] Vector::handler(__debug_monitor),
-    #[cfg(armv6m)] Vector::reserved(),
+    #[cfg(not(armv6m))] Handler::new(__debug_monitor),
+    #[cfg(armv6m)] Handler::reserved(),
     // 13: Reserved
-    Vector::reserved(),
+    Handler::reserved(),
     // Exception 14: Pend SV Interrupt [not on Cortex-M0 variants].
-    Vector::handler(__pend_sv),
+    Handler::new(__pend_sv),
     // Exception 15: System Tick Interrupt.
-    Vector::handler(__sys_tick),
+    Handler::new(__sys_tick),
 ];
 
 #[no_mangle]
 #[link_section = ".vector_table.interrupts"]
-pub static __INTERRUPTS: [Vector; 240] = [
-    Vector::handler(__irq0_handler),
-    Vector::handler(__irq1_handler),
-    Vector::handler(__irq2_handler),
-    Vector::handler(__irq3_handler),
-    Vector::handler(__irq4_handler),
-    Vector::handler(__irq5_handler),
-    Vector::handler(__irq6_handler),
-    Vector::handler(__irq7_handler),
-    Vector::handler(__irq8_handler),
-    Vector::handler(__irq9_handler),
-    Vector::handler(__irq10_handler),
-    Vector::handler(__irq11_handler),
-    Vector::handler(__irq12_handler),
-    Vector::handler(__irq13_handler),
-    Vector::handler(__irq14_handler),
-    Vector::handler(__irq15_handler),
-    Vector::handler(__irq16_handler),
-    Vector::handler(__irq17_handler),
-    Vector::handler(__irq18_handler),
-    Vector::handler(__irq19_handler),
-    Vector::handler(__irq20_handler),
-    Vector::handler(__irq21_handler),
-    Vector::handler(__irq22_handler),
-    Vector::handler(__irq23_handler),
-    Vector::handler(__irq24_handler),
-    Vector::handler(__irq25_handler),
-    Vector::handler(__irq26_handler),
-    Vector::handler(__irq27_handler),
-    Vector::handler(__irq28_handler),
-    Vector::handler(__irq29_handler),
-    Vector::handler(__irq30_handler),
-    Vector::handler(__irq31_handler),
-    Vector::handler(__irq32_handler),
-    Vector::handler(__irq33_handler),
-    Vector::handler(__irq34_handler),
-    Vector::handler(__irq35_handler),
-    Vector::handler(__irq36_handler),
-    Vector::handler(__irq37_handler),
-    Vector::handler(__irq38_handler),
-    Vector::handler(__irq39_handler),
-    Vector::handler(__irq40_handler),
-    Vector::handler(__irq41_handler),
-    Vector::handler(__irq42_handler),
-    Vector::handler(__irq43_handler),
-    Vector::handler(__irq44_handler),
-    Vector::handler(__irq45_handler),
-    Vector::handler(__irq46_handler),
-    Vector::handler(__irq47_handler),
-    Vector::handler(__irq48_handler),
-    Vector::handler(__irq49_handler),
-    Vector::handler(__irq50_handler),
-    Vector::handler(__irq51_handler),
-    Vector::handler(__irq52_handler),
-    Vector::handler(__irq53_handler),
-    Vector::handler(__irq54_handler),
-    Vector::handler(__irq55_handler),
-    Vector::handler(__irq56_handler),
-    Vector::handler(__irq57_handler),
-    Vector::handler(__irq58_handler),
-    Vector::handler(__irq59_handler),
-    Vector::handler(__irq60_handler),
-    Vector::handler(__irq61_handler),
-    Vector::handler(__irq62_handler),
-    Vector::handler(__irq63_handler),
-    Vector::handler(__irq64_handler),
-    Vector::handler(__irq65_handler),
-    Vector::handler(__irq66_handler),
-    Vector::handler(__irq67_handler),
-    Vector::handler(__irq68_handler),
-    Vector::handler(__irq69_handler),
-    Vector::handler(__irq70_handler),
-    Vector::handler(__irq71_handler),
-    Vector::handler(__irq72_handler),
-    Vector::handler(__irq73_handler),
-    Vector::handler(__irq74_handler),
-    Vector::handler(__irq75_handler),
-    Vector::handler(__irq76_handler),
-    Vector::handler(__irq77_handler),
-    Vector::handler(__irq78_handler),
-    Vector::handler(__irq79_handler),
-    Vector::handler(__irq80_handler),
-    Vector::handler(__irq81_handler),
-    Vector::handler(__irq82_handler),
-    Vector::handler(__irq83_handler),
-    Vector::handler(__irq84_handler),
-    Vector::handler(__irq85_handler),
-    Vector::handler(__irq86_handler),
-    Vector::handler(__irq87_handler),
-    Vector::handler(__irq88_handler),
-    Vector::handler(__irq89_handler),
-    Vector::handler(__irq90_handler),
-    Vector::handler(__irq91_handler),
-    Vector::handler(__irq92_handler),
-    Vector::handler(__irq93_handler),
-    Vector::handler(__irq94_handler),
-    Vector::handler(__irq95_handler),
-    Vector::handler(__irq96_handler),
-    Vector::handler(__irq97_handler),
-    Vector::handler(__irq98_handler),
-    Vector::handler(__irq99_handler),
-    Vector::handler(__irq100_handler),
-    Vector::handler(__irq101_handler),
-    Vector::handler(__irq102_handler),
-    Vector::handler(__irq103_handler),
-    Vector::handler(__irq104_handler),
-    Vector::handler(__irq105_handler),
-    Vector::handler(__irq106_handler),
-    Vector::handler(__irq107_handler),
-    Vector::handler(__irq108_handler),
-    Vector::handler(__irq109_handler),
-    Vector::handler(__irq110_handler),
-    Vector::handler(__irq111_handler),
-    Vector::handler(__irq112_handler),
-    Vector::handler(__irq113_handler),
-    Vector::handler(__irq114_handler),
-    Vector::handler(__irq115_handler),
-    Vector::handler(__irq116_handler),
-    Vector::handler(__irq117_handler),
-    Vector::handler(__irq118_handler),
-    Vector::handler(__irq119_handler),
-    Vector::handler(__irq120_handler),
-    Vector::handler(__irq121_handler),
-    Vector::handler(__irq122_handler),
-    Vector::handler(__irq123_handler),
-    Vector::handler(__irq124_handler),
-    Vector::handler(__irq125_handler),
-    Vector::handler(__irq126_handler),
-    Vector::handler(__irq127_handler),
-    Vector::handler(__irq128_handler),
-    Vector::handler(__irq129_handler),
-    Vector::handler(__irq130_handler),
-    Vector::handler(__irq131_handler),
-    Vector::handler(__irq132_handler),
-    Vector::handler(__irq133_handler),
-    Vector::handler(__irq134_handler),
-    Vector::handler(__irq135_handler),
-    Vector::handler(__irq136_handler),
-    Vector::handler(__irq137_handler),
-    Vector::handler(__irq138_handler),
-    Vector::handler(__irq139_handler),
-    Vector::handler(__irq140_handler),
-    Vector::handler(__irq141_handler),
-    Vector::handler(__irq142_handler),
-    Vector::handler(__irq143_handler),
-    Vector::handler(__irq144_handler),
-    Vector::handler(__irq145_handler),
-    Vector::handler(__irq146_handler),
-    Vector::handler(__irq147_handler),
-    Vector::handler(__irq148_handler),
-    Vector::handler(__irq149_handler),
-    Vector::handler(__irq150_handler),
-    Vector::handler(__irq151_handler),
-    Vector::handler(__irq152_handler),
-    Vector::handler(__irq153_handler),
-    Vector::handler(__irq154_handler),
-    Vector::handler(__irq155_handler),
-    Vector::handler(__irq156_handler),
-    Vector::handler(__irq157_handler),
-    Vector::handler(__irq158_handler),
-    Vector::handler(__irq159_handler),
-    Vector::handler(__irq160_handler),
-    Vector::handler(__irq161_handler),
-    Vector::handler(__irq162_handler),
-    Vector::handler(__irq163_handler),
-    Vector::handler(__irq164_handler),
-    Vector::handler(__irq165_handler),
-    Vector::handler(__irq166_handler),
-    Vector::handler(__irq167_handler),
-    Vector::handler(__irq168_handler),
-    Vector::handler(__irq169_handler),
-    Vector::handler(__irq170_handler),
-    Vector::handler(__irq171_handler),
-    Vector::handler(__irq172_handler),
-    Vector::handler(__irq173_handler),
-    Vector::handler(__irq174_handler),
-    Vector::handler(__irq175_handler),
-    Vector::handler(__irq176_handler),
-    Vector::handler(__irq177_handler),
-    Vector::handler(__irq178_handler),
-    Vector::handler(__irq179_handler),
-    Vector::handler(__irq180_handler),
-    Vector::handler(__irq181_handler),
-    Vector::handler(__irq182_handler),
-    Vector::handler(__irq183_handler),
-    Vector::handler(__irq184_handler),
-    Vector::handler(__irq185_handler),
-    Vector::handler(__irq186_handler),
-    Vector::handler(__irq187_handler),
-    Vector::handler(__irq188_handler),
-    Vector::handler(__irq189_handler),
-    Vector::handler(__irq190_handler),
-    Vector::handler(__irq191_handler),
-    Vector::handler(__irq192_handler),
-    Vector::handler(__irq193_handler),
-    Vector::handler(__irq194_handler),
-    Vector::handler(__irq195_handler),
-    Vector::handler(__irq196_handler),
-    Vector::handler(__irq197_handler),
-    Vector::handler(__irq198_handler),
-    Vector::handler(__irq199_handler),
-    Vector::handler(__irq200_handler),
-    Vector::handler(__irq201_handler),
-    Vector::handler(__irq202_handler),
-    Vector::handler(__irq203_handler),
-    Vector::handler(__irq204_handler),
-    Vector::handler(__irq205_handler),
-    Vector::handler(__irq206_handler),
-    Vector::handler(__irq207_handler),
-    Vector::handler(__irq208_handler),
-    Vector::handler(__irq209_handler),
-    Vector::handler(__irq210_handler),
-    Vector::handler(__irq211_handler),
-    Vector::handler(__irq212_handler),
-    Vector::handler(__irq213_handler),
-    Vector::handler(__irq214_handler),
-    Vector::handler(__irq215_handler),
-    Vector::handler(__irq216_handler),
-    Vector::handler(__irq217_handler),
-    Vector::handler(__irq218_handler),
-    Vector::handler(__irq219_handler),
-    Vector::handler(__irq220_handler),
-    Vector::handler(__irq221_handler),
-    Vector::handler(__irq222_handler),
-    Vector::handler(__irq223_handler),
-    Vector::handler(__irq224_handler),
-    Vector::handler(__irq225_handler),
-    Vector::handler(__irq226_handler),
-    Vector::handler(__irq227_handler),
-    Vector::handler(__irq228_handler),
-    Vector::handler(__irq229_handler),
-    Vector::handler(__irq230_handler),
-    Vector::handler(__irq231_handler),
-    Vector::handler(__irq232_handler),
-    Vector::handler(__irq233_handler),
-    Vector::handler(__irq234_handler),
-    Vector::handler(__irq235_handler),
-    Vector::handler(__irq236_handler),
-    Vector::handler(__irq237_handler),
-    Vector::handler(__irq238_handler),
-    Vector::handler(__irq239_handler),
+pub static __INTERRUPTS: [Handler; 240] = [
+    Handler::new(__irq0_handler),
+    Handler::new(__irq1_handler),
+    Handler::new(__irq2_handler),
+    Handler::new(__irq3_handler),
+    Handler::new(__irq4_handler),
+    Handler::new(__irq5_handler),
+    Handler::new(__irq6_handler),
+    Handler::new(__irq7_handler),
+    Handler::new(__irq8_handler),
+    Handler::new(__irq9_handler),
+    Handler::new(__irq10_handler),
+    Handler::new(__irq11_handler),
+    Handler::new(__irq12_handler),
+    Handler::new(__irq13_handler),
+    Handler::new(__irq14_handler),
+    Handler::new(__irq15_handler),
+    Handler::new(__irq16_handler),
+    Handler::new(__irq17_handler),
+    Handler::new(__irq18_handler),
+    Handler::new(__irq19_handler),
+    Handler::new(__irq20_handler),
+    Handler::new(__irq21_handler),
+    Handler::new(__irq22_handler),
+    Handler::new(__irq23_handler),
+    Handler::new(__irq24_handler),
+    Handler::new(__irq25_handler),
+    Handler::new(__irq26_handler),
+    Handler::new(__irq27_handler),
+    Handler::new(__irq28_handler),
+    Handler::new(__irq29_handler),
+    Handler::new(__irq30_handler),
+    Handler::new(__irq31_handler),
+    Handler::new(__irq32_handler),
+    Handler::new(__irq33_handler),
+    Handler::new(__irq34_handler),
+    Handler::new(__irq35_handler),
+    Handler::new(__irq36_handler),
+    Handler::new(__irq37_handler),
+    Handler::new(__irq38_handler),
+    Handler::new(__irq39_handler),
+    Handler::new(__irq40_handler),
+    Handler::new(__irq41_handler),
+    Handler::new(__irq42_handler),
+    Handler::new(__irq43_handler),
+    Handler::new(__irq44_handler),
+    Handler::new(__irq45_handler),
+    Handler::new(__irq46_handler),
+    Handler::new(__irq47_handler),
+    Handler::new(__irq48_handler),
+    Handler::new(__irq49_handler),
+    Handler::new(__irq50_handler),
+    Handler::new(__irq51_handler),
+    Handler::new(__irq52_handler),
+    Handler::new(__irq53_handler),
+    Handler::new(__irq54_handler),
+    Handler::new(__irq55_handler),
+    Handler::new(__irq56_handler),
+    Handler::new(__irq57_handler),
+    Handler::new(__irq58_handler),
+    Handler::new(__irq59_handler),
+    Handler::new(__irq60_handler),
+    Handler::new(__irq61_handler),
+    Handler::new(__irq62_handler),
+    Handler::new(__irq63_handler),
+    Handler::new(__irq64_handler),
+    Handler::new(__irq65_handler),
+    Handler::new(__irq66_handler),
+    Handler::new(__irq67_handler),
+    Handler::new(__irq68_handler),
+    Handler::new(__irq69_handler),
+    Handler::new(__irq70_handler),
+    Handler::new(__irq71_handler),
+    Handler::new(__irq72_handler),
+    Handler::new(__irq73_handler),
+    Handler::new(__irq74_handler),
+    Handler::new(__irq75_handler),
+    Handler::new(__irq76_handler),
+    Handler::new(__irq77_handler),
+    Handler::new(__irq78_handler),
+    Handler::new(__irq79_handler),
+    Handler::new(__irq80_handler),
+    Handler::new(__irq81_handler),
+    Handler::new(__irq82_handler),
+    Handler::new(__irq83_handler),
+    Handler::new(__irq84_handler),
+    Handler::new(__irq85_handler),
+    Handler::new(__irq86_handler),
+    Handler::new(__irq87_handler),
+    Handler::new(__irq88_handler),
+    Handler::new(__irq89_handler),
+    Handler::new(__irq90_handler),
+    Handler::new(__irq91_handler),
+    Handler::new(__irq92_handler),
+    Handler::new(__irq93_handler),
+    Handler::new(__irq94_handler),
+    Handler::new(__irq95_handler),
+    Handler::new(__irq96_handler),
+    Handler::new(__irq97_handler),
+    Handler::new(__irq98_handler),
+    Handler::new(__irq99_handler),
+    Handler::new(__irq100_handler),
+    Handler::new(__irq101_handler),
+    Handler::new(__irq102_handler),
+    Handler::new(__irq103_handler),
+    Handler::new(__irq104_handler),
+    Handler::new(__irq105_handler),
+    Handler::new(__irq106_handler),
+    Handler::new(__irq107_handler),
+    Handler::new(__irq108_handler),
+    Handler::new(__irq109_handler),
+    Handler::new(__irq110_handler),
+    Handler::new(__irq111_handler),
+    Handler::new(__irq112_handler),
+    Handler::new(__irq113_handler),
+    Handler::new(__irq114_handler),
+    Handler::new(__irq115_handler),
+    Handler::new(__irq116_handler),
+    Handler::new(__irq117_handler),
+    Handler::new(__irq118_handler),
+    Handler::new(__irq119_handler),
+    Handler::new(__irq120_handler),
+    Handler::new(__irq121_handler),
+    Handler::new(__irq122_handler),
+    Handler::new(__irq123_handler),
+    Handler::new(__irq124_handler),
+    Handler::new(__irq125_handler),
+    Handler::new(__irq126_handler),
+    Handler::new(__irq127_handler),
+    Handler::new(__irq128_handler),
+    Handler::new(__irq129_handler),
+    Handler::new(__irq130_handler),
+    Handler::new(__irq131_handler),
+    Handler::new(__irq132_handler),
+    Handler::new(__irq133_handler),
+    Handler::new(__irq134_handler),
+    Handler::new(__irq135_handler),
+    Handler::new(__irq136_handler),
+    Handler::new(__irq137_handler),
+    Handler::new(__irq138_handler),
+    Handler::new(__irq139_handler),
+    Handler::new(__irq140_handler),
+    Handler::new(__irq141_handler),
+    Handler::new(__irq142_handler),
+    Handler::new(__irq143_handler),
+    Handler::new(__irq144_handler),
+    Handler::new(__irq145_handler),
+    Handler::new(__irq146_handler),
+    Handler::new(__irq147_handler),
+    Handler::new(__irq148_handler),
+    Handler::new(__irq149_handler),
+    Handler::new(__irq150_handler),
+    Handler::new(__irq151_handler),
+    Handler::new(__irq152_handler),
+    Handler::new(__irq153_handler),
+    Handler::new(__irq154_handler),
+    Handler::new(__irq155_handler),
+    Handler::new(__irq156_handler),
+    Handler::new(__irq157_handler),
+    Handler::new(__irq158_handler),
+    Handler::new(__irq159_handler),
+    Handler::new(__irq160_handler),
+    Handler::new(__irq161_handler),
+    Handler::new(__irq162_handler),
+    Handler::new(__irq163_handler),
+    Handler::new(__irq164_handler),
+    Handler::new(__irq165_handler),
+    Handler::new(__irq166_handler),
+    Handler::new(__irq167_handler),
+    Handler::new(__irq168_handler),
+    Handler::new(__irq169_handler),
+    Handler::new(__irq170_handler),
+    Handler::new(__irq171_handler),
+    Handler::new(__irq172_handler),
+    Handler::new(__irq173_handler),
+    Handler::new(__irq174_handler),
+    Handler::new(__irq175_handler),
+    Handler::new(__irq176_handler),
+    Handler::new(__irq177_handler),
+    Handler::new(__irq178_handler),
+    Handler::new(__irq179_handler),
+    Handler::new(__irq180_handler),
+    Handler::new(__irq181_handler),
+    Handler::new(__irq182_handler),
+    Handler::new(__irq183_handler),
+    Handler::new(__irq184_handler),
+    Handler::new(__irq185_handler),
+    Handler::new(__irq186_handler),
+    Handler::new(__irq187_handler),
+    Handler::new(__irq188_handler),
+    Handler::new(__irq189_handler),
+    Handler::new(__irq190_handler),
+    Handler::new(__irq191_handler),
+    Handler::new(__irq192_handler),
+    Handler::new(__irq193_handler),
+    Handler::new(__irq194_handler),
+    Handler::new(__irq195_handler),
+    Handler::new(__irq196_handler),
+    Handler::new(__irq197_handler),
+    Handler::new(__irq198_handler),
+    Handler::new(__irq199_handler),
+    Handler::new(__irq200_handler),
+    Handler::new(__irq201_handler),
+    Handler::new(__irq202_handler),
+    Handler::new(__irq203_handler),
+    Handler::new(__irq204_handler),
+    Handler::new(__irq205_handler),
+    Handler::new(__irq206_handler),
+    Handler::new(__irq207_handler),
+    Handler::new(__irq208_handler),
+    Handler::new(__irq209_handler),
+    Handler::new(__irq210_handler),
+    Handler::new(__irq211_handler),
+    Handler::new(__irq212_handler),
+    Handler::new(__irq213_handler),
+    Handler::new(__irq214_handler),
+    Handler::new(__irq215_handler),
+    Handler::new(__irq216_handler),
+    Handler::new(__irq217_handler),
+    Handler::new(__irq218_handler),
+    Handler::new(__irq219_handler),
+    Handler::new(__irq220_handler),
+    Handler::new(__irq221_handler),
+    Handler::new(__irq222_handler),
+    Handler::new(__irq223_handler),
+    Handler::new(__irq224_handler),
+    Handler::new(__irq225_handler),
+    Handler::new(__irq226_handler),
+    Handler::new(__irq227_handler),
+    Handler::new(__irq228_handler),
+    Handler::new(__irq229_handler),
+    Handler::new(__irq230_handler),
+    Handler::new(__irq231_handler),
+    Handler::new(__irq232_handler),
+    Handler::new(__irq233_handler),
+    Handler::new(__irq234_handler),
+    Handler::new(__irq235_handler),
+    Handler::new(__irq236_handler),
+    Handler::new(__irq237_handler),
+    Handler::new(__irq238_handler),
+    Handler::new(__irq239_handler),
 ];
 
 extern "C" {
-    static mut __heep_start: u32;
-
     fn __non_maskable_interrupt();
 
     fn __hard_fault();
